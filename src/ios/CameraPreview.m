@@ -76,9 +76,19 @@
     // Setup session
     self.sessionManager.delegate = self.cameraRenderController;
 
-    [self.sessionManager setupSession:defaultCamera completion:^(BOOL started) {
+    [self.sessionManager setupSession:defaultCamera completion:^(BOOL started, AVCaptureDevice *camera) {
 
-      [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK] callbackId:command.callbackId];
+      NSDictionary *cameraInfo = @{
+        @"modelID": camera.modelID,
+        @"deviceType": camera.deviceType,
+        @"position": @(camera.position),
+        @"zoomRange": @{
+          @"min": @(camera.minAvailableVideoZoomFactor),
+          @"max": @(camera.activeFormat.videoMaxZoomFactor),
+        }
+      };
+
+      [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:cameraInfo] callbackId:command.callbackId];
 
     }];
 

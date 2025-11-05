@@ -89,7 +89,7 @@
   return orientation;
 }
 
-- (void) setupSession:(NSString *)defaultCamera completion:(void(^)(BOOL started))completion{
+- (void) setupSession:(NSString *)defaultCamera completion:(void(^)(BOOL started, AVCaptureDevice* camera))completion{
   // If this fails, video input will just stream blank frames and the user will be notified. User only has to accept once.
   [self checkDeviceAuthorizationStatus];
 
@@ -152,7 +152,7 @@
 
       [self.session startRunning];
 
-      completion(success);
+      completion(success, videoDevice);
   });
   });
 }
