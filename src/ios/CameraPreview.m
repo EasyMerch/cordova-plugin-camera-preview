@@ -3,7 +3,6 @@
 #import <Cordova/CDVInvokedUrlCommand.h>
 #import <GLKit/GLKit.h>
 #import "CameraPreview.h"
-#import <objc/runtime.h>
 
 #define TMP_IMAGE_PREFIX @"cpcp_capture_"
 
