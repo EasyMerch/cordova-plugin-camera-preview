@@ -76,17 +76,15 @@
     // Setup session
     self.sessionManager.delegate = self.cameraRenderController;
 
-    [self.sessionManager setupSession:defaultCamera completion:^(BOOL started) {
-
-      AVCaptureDevice *device = [self.sessionManager cameraWithPosition:self.sessionManager.defaultCamera];
+    [self.sessionManager setupSession:defaultCamera completion:^(BOOL started, AVCaptureDevice *camera) {
 
       NSDictionary *cameraInfo = @{
-        @"modelID": device.modelID,
-        @"deviceType": device.deviceType,
-        @"position": @(device.position),
+        @"modelID": camera.modelID,
+        @"deviceType": camera.deviceType,
+        @"position": @(camera.position),
         @"zoomRange": @{
-          @"min": @(device.minAvailableVideoZoomFactor),
-          @"max": @(device.maxAvailableVideoZoomFactor),
+          @"min": @(camera.minAvailableVideoZoomFactor),
+          @"max": @(camera.activeFormat.videoMaxZoomFactor),
         }
       };
 
