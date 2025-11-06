@@ -94,7 +94,6 @@
   [self checkDeviceAuthorizationStatus];
 
   dispatch_async(dispatch_get_main_queue(), ^{
-  AVCaptureVideoOrientation currentOrientation = [self getCurrentOrientation];
   dispatch_async(self.sessionQueue, ^{
       NSError *error = nil;
       BOOL success = TRUE;
@@ -147,10 +146,12 @@
         [self.session addOutput:dataOutput];
       }
 
-      [self updateOrientation:currentOrientation];
       self.device = videoDevice;
 
       [self.session startRunning];
+      
+      AVCaptureVideoOrientation currentOrientation = [self getCurrentOrientation];
+      [self updateOrientation:currentOrientation];
 
       completion(success, videoDevice);
   });
@@ -181,7 +182,6 @@
   }
 
   dispatch_async(dispatch_get_main_queue(), ^{
-  AVCaptureVideoOrientation currentOrientation = [self getCurrentOrientation];
   dispatch_async([self sessionQueue], ^{
       NSError *error = nil;
       BOOL success = TRUE;
@@ -219,11 +219,13 @@
         [self setVideoDeviceInput:videoDeviceInput];
       }
 
-      [self updateOrientation:currentOrientation];
       [self.session commitConfiguration];
       self.device = videoDevice;
 
       [self.session startRunning];
+
+      AVCaptureVideoOrientation currentOrientation = [self getCurrentOrientation];
+      [self updateOrientation:currentOrientation];
 
       completion(success);
   });
