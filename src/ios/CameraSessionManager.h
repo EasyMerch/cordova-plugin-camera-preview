@@ -1,6 +1,10 @@
 #import <CoreImage/CoreImage.h>
 #import <AVFoundation/AVFoundation.h>
 #import "TemperatureAndTint.h"
+#import "Cordova/Cordova.h"
+#if defined(__CORDOVA_8_0_0)
+#import <UIKit/UIInterface.h>
+#endif
 
 @protocol OnFocusDelegate
 - (void) onFocus;

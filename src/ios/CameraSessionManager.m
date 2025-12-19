@@ -1,4 +1,8 @@
 #include "CameraSessionManager.h"
+#import "Cordova/Cordova.h"
+#if defined(__CORDOVA_8_0_0)
+#import <UIKit/UIApplication.h>
+#endif
 
 @implementation CameraSessionManager
 
