@@ -3,6 +3,8 @@
 #import <Cordova/CDVInvokedUrlCommand.h>
 #import <GLKit/GLKit.h>
 #import "CameraPreview.h"
+#import "encode.h"
+#import <Accelerate/Accelerate.h>
 
 #define TMP_IMAGE_PREFIX @"cpcp_capture_"
 
@@ -475,8 +477,10 @@
     CGFloat width = (CGFloat)[command.arguments[0] floatValue];
     CGFloat height = (CGFloat)[command.arguments[1] floatValue];
     CGFloat quality = (CGFloat)[command.arguments[2] floatValue] / 100.0f;
+    CGFloat losslessPreset = (CGFloat)[command.arguments[3] floatValue];
+    NSString* format = (NSString*)[command.arguments[4] stringValue] ?: @"jpeg";
 
-    [self invokeTakePicture:width withHeight:height withQuality:quality];
+    [self invokeTakePicture:width withHeight:height withQuality:quality withLossLessPreset:losslessPreset withFormat:format];
   } else {
     pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Camera not started"];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
@@ -707,7 +711,21 @@
 }
 
 - (void) invokeTakePicture {
-  [self invokeTakePicture:0.0 withHeight:0.0 withQuality:0.85];
+	[self invokeTakePicture:0.0 withHeight:0.0 withQuality:0.85 withLossLessPreset:0.0 withFormat:@"jpeg"];
+}
+
+- (void) invokeTakePicture:(CGFloat) width withHeight:(CGFloat) height withQuality:(CGFloat) quality {
+	[self invokeTakePicture:width withHeight:height withQuality:quality withLossLessPreset:0.0 withFormat:@"jpeg"];
+}
+
+- (void) invokeTakePicture:(CGFloat) width withHeight:(CGFloat) height withQuality:(CGFloat) quality withLossLessPreset:(CGFloat) lossLessPreset withFormat:(NSString *) format {
+    self.takePictureWidth = width;
+    self.takePictureHeight = height;
+    self.takePictureQuality = quality;
+    self.takePictureLosslessPreset = lossLessPreset;
+    self.imageFormat = format;
+    AVCapturePhotoSettings* settings = [self.sessionManager captureSettingsWithFormat:format];
+    [self.sessionManager.stillImageOutput capturePhotoWithSettings:settings delegate:self];
 }
 
 - (void) invokeTakePictureOnFocus {
@@ -715,142 +733,446 @@
   [self.sessionManager takePictureOnFocus];
 }
 
-- (void) invokeTakePicture:(CGFloat) width withHeight:(CGFloat) height withQuality:(CGFloat) quality{
-  self.takePictureWidth = width;
-  self.takePictureHeight = height;
-  self.takePictureQuality = quality;
-  AVCapturePhotoSettings* settings = [self.sessionManager captureSettings];
-  [self.sessionManager.stillImageOutput capturePhotoWithSettings:settings delegate:self];
+- (NSData *)processImageFromPixelBuffer:(CVPixelBufferRef)pixelBuffer targetWidth:(int)targetWidth targetHeight:(int)targetHeight orientation:(CGImagePropertyOrientation)orientation wrapX:(BOOL)wrapX quality:(float)quality losslessPreset:(float)losslessPreset {
+    WebPPicture pic;
+    WebPPictureInit(&pic);
+    pic.use_argb = 1;
+    uint8_t *imageData = NULL;
+    int stride;
+    int w, h;
+    if (pixelBuffer) {
+        CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+        uint8_t *baseAddr = CVPixelBufferGetBaseAddress(pixelBuffer);
+        w = (int)CVPixelBufferGetWidth(pixelBuffer);
+        h = (int)CVPixelBufferGetHeight(pixelBuffer);
+        stride = (int)CVPixelBufferGetBytesPerRow(pixelBuffer);
+        
+        imageData = malloc(h * stride);
+        for (int y = 0; y < h; y++) {
+            memcpy(imageData + y * stride, baseAddr + y * stride, stride);
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    } else {
+        return nil;
+    }
+    
+    pic.width = w;
+    pic.height = h;
+    
+    if (!WebPPictureImportBGRA(&pic, imageData, stride)) {
+        free(imageData);
+        WebPPictureFree(&pic);
+        return nil;
+    }
+    
+    if (targetWidth > 0 && targetHeight > 0) {
+        if (!WebPPictureRescale(&pic, targetWidth, targetHeight)) {
+            WebPPictureFree(&pic);
+            return nil;
+        }
+    }
+    
+    if (imageData) {
+        vImage_Buffer src = { imageData, (vImagePixelCount)h, (vImagePixelCount)w, stride };
+        uint8_t *mirrored_data = malloc(h * stride);
+        vImage_Buffer dst = { mirrored_data, (vImagePixelCount)h, (vImagePixelCount)w, stride };
+        vImage_Error err = kvImageNoError;
+        BOOL mirrored = true;
+        switch (orientation) {
+            case kCGImagePropertyOrientationUpMirrored:
+                err = vImageHorizontalReflect_ARGB8888(&src, &dst, kvImageNoFlags);
+                break;
+            case kCGImagePropertyOrientationLeftMirrored:
+            case kCGImagePropertyOrientationRightMirrored:
+            case kCGImagePropertyOrientationDownMirrored:
+                err = vImageVerticalReflect_ARGB8888(&src, &dst, kvImageNoFlags);
+                break;
+            default:
+                free(mirrored_data);
+                mirrored = false;
+                break;
+        }
+        if (mirrored) {
+            free(imageData);
+            if (err != kvImageNoError) {
+                free(mirrored_data);
+                WebPPictureFree(&pic);
+                return nil;
+            }
+            
+            if (!mirrored_data) {
+                WebPPictureFree(&pic);
+                return nil;
+            }
+            
+            imageData = mirrored_data;
+        }
+        
+        if (wrapX) {
+            uint8_t *wrap_data = malloc(h * stride);
+            src = (vImage_Buffer){ imageData, (vImagePixelCount)h, (vImagePixelCount)w, w * 4 };
+            dst = (vImage_Buffer){ wrap_data, (vImagePixelCount)h, (vImagePixelCount)w, w * 4 };
+            err = vImageVerticalReflect_ARGB8888(&src, &dst, kvImageNoFlags);
+            free(imageData);
+            if (err != kvImageNoError) {
+                free(wrap_data);
+                WebPPictureFree(&pic);
+                return  nil;
+            }
+            
+            if (!wrap_data) {
+                WebPPictureFree(&pic);
+                return nil;
+            }
+            imageData = wrap_data;
+        }
+        
+        src = (vImage_Buffer){ imageData, (vImagePixelCount)h, (vImagePixelCount)w, w * 4 };
+        uint8_t *rotatedData = malloc(h * stride);
+        uint8_t bgColor[4] = {0, 0, 0, 0};
+        int newW;
+        int newH;
+        
+        switch (orientation) {
+            case kCGImagePropertyOrientationDownMirrored:
+            case kCGImagePropertyOrientationUp:
+            case kCGImagePropertyOrientationUpMirrored:
+                newW = w;
+                newH = h;
+                dst = (vImage_Buffer){ rotatedData, newH, newW, newW * 4 };
+                err = vImageRotate90_ARGB8888(&src, &dst, 0, bgColor, kvImageNoFlags);
+                break;
+            case kCGImagePropertyOrientationDown:
+                newW = w;
+                newH = h;
+                dst = (vImage_Buffer){ rotatedData, newH, newW, newW * 4 };
+                err = vImageRotate90_ARGB8888(&src, &dst, 2, bgColor, kvImageNoFlags);
+                break;
+            case kCGImagePropertyOrientationLeft:
+            case kCGImagePropertyOrientationLeftMirrored:
+                newW = h;
+                newH = w;
+                dst = (vImage_Buffer){ rotatedData, newH, newW, newW * 4 };
+                err = vImageRotate90_ARGB8888(&src, &dst, 1, bgColor, kvImageNoFlags);
+                break;
+            case kCGImagePropertyOrientationRightMirrored:
+            case kCGImagePropertyOrientationRight:
+                newW = h;
+                newH = w;
+                dst = (vImage_Buffer){ rotatedData, newH, newW, newW * 4 };
+                err = vImageRotate90_ARGB8888(&src, &dst, 3, bgColor, kvImageNoFlags);
+                break;
+            default:
+                break;
+        }
+
+        free(imageData);
+        if (err != kvImageNoError) {
+            free(rotatedData);
+            WebPPictureFree(&pic);
+            return nil;
+        }
+
+        imageData = rotatedData;
+        w = newW;
+        h = newH;
+    }
+    
+    WebPPictureFree(&pic);
+    WebPPictureInit(&pic);
+    pic.width = w;
+    pic.height = h;
+    
+    if (!WebPPictureImportBGRA(&pic, imageData, w * 4)) {
+        free(imageData);
+        WebPPictureFree(&pic);
+        return nil;
+    }
+    
+    WebPConfig config;
+    if (!WebPConfigInit(&config)) {
+        NSLog(@"WebPConfigInit failed");
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+        return nil;
+    }
+    
+    if (!WebPConfigLosslessPreset(&config, losslessPreset)) {
+        NSLog(@"WebPConfigLosslessPreset failed");
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+        return nil;
+    }
+    config.quality = quality;
+    
+    NSData *outputData = nil;
+    WebPMemoryWriter writer;
+    WebPMemoryWriterInit(&writer);
+    pic.writer = WebPMemoryWrite;
+    pic.custom_ptr = &writer;
+    uint8_t *webpData = NULL;
+    size_t webpSize = 0;
+    
+    if (WebPEncode(&config, &pic)) {
+        webpData = writer.mem;
+        webpSize = writer.size;
+        outputData = [NSData dataWithBytes:webpData length:webpSize];
+    } else {
+        WebPMemoryWriterClear(&writer);
+        NSLog(@"WebPEncode failed");
+    }
+    WebPMemoryWriterClear(&writer);
+    
+    WebPPictureFree(&pic);
+    return outputData;
 }
 
 - (void)captureOutput:(AVCapturePhotoOutput *)output didFinishProcessingPhoto:(AVCapturePhoto *)photo error:(NSError *)error {
-  CGFloat width = self.takePictureWidth;
-  CGFloat height = self.takePictureHeight;
-  CGFloat quality = self.takePictureQuality;
-  BOOL enableFastShoot = self.enableFastShoot;
-  NSLog(@"Done creating still image");
+    CGFloat width = self.takePictureWidth;
+    CGFloat height = self.takePictureHeight;
+    CGFloat quality = self.takePictureQuality;
+    CGFloat losslessPreset = self.takePictureLosslessPreset ?: 0;
+    NSString *format = self.imageFormat ?: @"jpeg";
+    BOOL enableFastShoot = [format isEqualToString:@"jpeg"] && self.enableFastShoot;
 
-  if (error) {
-  NSLog(@"%@", error);
-  CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:[error description]];
-  [pluginResult setKeepCallbackAsBool:self.cameraRenderController.tapToTakePicture];
-  [self.commandDelegate sendPluginResult:pluginResult callbackId:self.onPictureTakenHandlerId];
-  } else {
-
-  NSData *imageData = [photo fileDataRepresentation];
-
-  CIImage *capturedCImage;
-  CGSize imageSize;
-  //image resize
-
-  if(enableFastShoot){
-    NSDictionary* ciImageOptions = @{
-      kCIImageApplyOrientationProperty : @true
-    };
-    capturedCImage = [[CIImage alloc] initWithData:imageData options:ciImageOptions];
-    imageSize = capturedCImage.extent.size;
-  } else {
-    UIImage *capturedImage  = [[UIImage alloc] initWithData:imageData];
-    capturedCImage = [[CIImage alloc] initWithCGImage:[capturedImage CGImage]];
-    imageSize = capturedImage.size;
-  }
-
-  if(width > 0 && height > 0){
-    CGFloat scaleHeight = width/imageSize.height;
-    CGFloat scaleWidth = height/imageSize.width;
-    CGFloat scale = scaleHeight > scaleWidth ? scaleWidth : scaleHeight;
-
-    CIFilter *resizeFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
-    [resizeFilter setValue:capturedCImage forKey:kCIInputImageKey];
-    [resizeFilter setValue:[NSNumber numberWithFloat:1.0f] forKey:@"inputAspectRatio"];
-    [resizeFilter setValue:[NSNumber numberWithFloat:scale] forKey:@"inputScale"];
-    capturedCImage = [resizeFilter outputImage];
-  }
-
-  CIImage *imageToFilter;
-  CIImage *finalCImage;
-
-  //fix front mirroring
-  if (self.sessionManager.defaultCamera == AVCaptureDevicePositionFront) {
-    CGAffineTransform matrix;
-    if(enableFastShoot){
-    matrix = CGAffineTransformTranslate(CGAffineTransformMakeScale(-1, 1), capturedCImage.extent.size.width, 0);
+    if (error) {
+        NSLog(@"%@", error);
+        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:[error description]];
+        [pluginResult setKeepCallbackAsBool:self.cameraRenderController.tapToTakePicture];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:self.onPictureTakenHandlerId];
     } else {
-      matrix = CGAffineTransformTranslate(CGAffineTransformMakeScale(1, -1), 0, capturedCImage.extent.size.height);
+        CIImage *capturedCImage;
+        CGSize imageSize;
+        NSData *webpDataObj = NULL;
+        if ([format isEqualToString:@"webp"]) {
+            NSDictionary *metadata = photo.metadata;
+            NSNumber *orientationNumber = metadata[(NSString *)kCGImagePropertyOrientation] ?: 0;
+            CGImagePropertyOrientation orientation = [orientationNumber intValue];
+            CVPixelBufferRef pixelBuffer = photo.pixelBuffer;
+            if (pixelBuffer) {
+                BOOL wrapX = self.sessionManager.defaultCamera == AVCaptureDevicePositionFront;
+                webpDataObj = [self processImageFromPixelBuffer:pixelBuffer targetWidth:width targetHeight:height orientation: orientation wrapX: wrapX quality:quality losslessPreset:losslessPreset];
+            }
+        } else {
+            NSData *imageData = [photo fileDataRepresentation];
+            if (enableFastShoot) {
+                NSDictionary *ciImageOptions = @{
+                    kCIImageApplyOrientationProperty : @true
+                };
+                capturedCImage = [[CIImage alloc] initWithData:imageData options:ciImageOptions];
+                imageSize = capturedCImage.extent.size;
+            } else {
+                UIImage *capturedImage = [[UIImage alloc] initWithData:imageData];
+                capturedCImage = [[CIImage alloc] initWithCGImage:[capturedImage CGImage]];
+                imageSize = capturedImage.size;
+            }
+        }
+
+        if(width > 0 && height > 0){
+            CGFloat scaleHeight = width/imageSize.height;
+            CGFloat scaleWidth = height/imageSize.width;
+            CGFloat scale = scaleHeight > scaleWidth ? scaleWidth : scaleHeight;
+
+            CIFilter *resizeFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+            [resizeFilter setValue:capturedCImage forKey:kCIInputImageKey];
+            [resizeFilter setValue:[NSNumber numberWithFloat:1.0f] forKey:@"inputAspectRatio"];
+            [resizeFilter setValue:[NSNumber numberWithFloat:scale] forKey:@"inputScale"];
+            capturedCImage = [resizeFilter outputImage];
+        }
+
+        CIImage *imageToFilter;
+        CIImage *finalCImage;
+
+        //fix front mirroring
+        if (self.sessionManager.defaultCamera == AVCaptureDevicePositionFront) {
+            CGAffineTransform matrix;
+            if(enableFastShoot){
+                matrix = CGAffineTransformTranslate(CGAffineTransformMakeScale(-1, 1), capturedCImage.extent.size.width, 0);
+            } else {
+                matrix = CGAffineTransformTranslate(CGAffineTransformMakeScale(1, -1), 0, capturedCImage.extent.size.height);
+            }
+            imageToFilter = [capturedCImage imageByApplyingTransform:matrix];
+        } else {
+            imageToFilter = capturedCImage;
+        }
+
+        CIFilter *filter = [self.sessionManager ciFilter];
+        if (filter != nil) {
+            [self.sessionManager.filterLock lock];
+            [filter setValue:imageToFilter forKey:kCIInputImageKey];
+            finalCImage = [filter outputImage];
+            [self.sessionManager.filterLock unlock];
+        } else {
+            finalCImage = imageToFilter;
+        }
+
+        CDVPluginResult *pluginResult = nil;
+        
+        if ([format isEqualToString:@"webp"]) {
+            if (!webpDataObj) {
+                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:@"WebP encoding failed"];
+            } else if (self.storeToFile) {
+                NSString *filePath = [self getTempFilePath:@"webp"];
+                NSError *writeError = nil;
+                if (![webpDataObj writeToFile:filePath options:NSAtomicWrite error:&writeError]) {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:writeError.localizedDescription];
+                } else {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[NSURL fileURLWithPath:filePath].absoluteString];
+                }
+            } else {
+                NSString *base64 = [webpDataObj base64EncodedStringWithOptions:0];
+                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:@[base64]];
+            }
+        } else if (enableFastShoot) {
+            if (self.storeToFile) {
+                NSString *filePath = [self getTempFilePath:@"jpg"];
+                NSURL *path = [NSURL fileURLWithPath:filePath];
+                CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+                NSDictionary *options = @{
+                    (NSString *)kCGImageDestinationLossyCompressionQuality : [NSNumber numberWithFloat:quality]
+                };
+                NSError *error;
+                BOOL saved = [self.cameraRenderController.ciContext writeJPEGRepresentationOfImage:finalCImage toURL:path colorSpace:colorSpace options:options error:&error];
+                if (!saved) {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:[error localizedDescription]];
+                } else {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[path absoluteString]];
+                }
+            } else {
+                CGImageRef finalCGImage = [self.cameraRenderController.ciContext createCGImage:finalCImage fromRect:finalCImage.extent];
+                UIImage *resultImage = [UIImage imageWithCGImage:finalCGImage];
+                double radians = [self radiansFromUIImageOrientation:resultImage.imageOrientation];
+                CGImageRef rotatedCGImage = [self CGImageRotated:finalCGImage withRadians:radians];
+                CGImageRelease(finalCGImage);
+                if (!rotatedCGImage) {
+                    rotatedCGImage = finalCGImage;
+                }
+                NSData *jpegData = UIImageJPEGRepresentation([UIImage imageWithCGImage:rotatedCGImage], quality);
+                CGImageRelease(rotatedCGImage);
+                if (!jpegData) {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"JPEG encoding failed"];
+                } else {
+                    NSString *base64 = [jpegData base64EncodedStringWithOptions:0];
+                    NSMutableArray *params = [[NSMutableArray alloc] init];
+                    [params addObject:base64];
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:params];
+                }
+            }
+        } else {
+            CGImageRef finalCGImage = [self.cameraRenderController.ciContext createCGImage:finalCImage fromRect:finalCImage.extent];
+            if (!finalCGImage) {
+                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Failed to create CGImage"];
+                [pluginResult setKeepCallbackAsBool:self.cameraRenderController.tapToTakePicture];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:self.onPictureTakenHandlerId];
+                return;
+            }
+
+            UIImage *resultImage = [UIImage imageWithCGImage:finalCGImage];
+            double radians = [self radiansFromUIImageOrientation:resultImage.imageOrientation];
+            CGImageRef rotatedCGImage = [self CGImageRotated:finalCGImage withRadians:radians];
+            CGImageRelease(finalCGImage);
+            if (!rotatedCGImage) {
+                rotatedCGImage = finalCGImage;
+            }
+
+            NSData *outputData = nil;
+            NSString *fileExtension = @"jpg";
+            outputData = UIImageJPEGRepresentation([UIImage imageWithCGImage:rotatedCGImage], quality);
+
+            CGImageRelease(rotatedCGImage);
+
+            if (!outputData) {
+                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Failed to encode image"];
+                [pluginResult setKeepCallbackAsBool:self.cameraRenderController.tapToTakePicture];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:self.onPictureTakenHandlerId];
+                return;
+            }
+
+            if (self.storeToFile) {
+                NSString *filePath = [self getTempFilePath:fileExtension];
+                NSError *writeError = nil;
+                BOOL saved = [outputData writeToFile:filePath options:NSAtomicWrite error:&writeError];
+                if (!saved) {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:[writeError localizedDescription]];
+                } else {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[[NSURL fileURLWithPath:filePath] absoluteString]];
+                }
+            } else {
+                NSString *base64 = [outputData base64EncodedStringWithOptions:0];
+                NSMutableArray *params = [[NSMutableArray alloc] init];
+                [params addObject:base64];
+                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:params];
+            }
+        }
+
+        [pluginResult setKeepCallbackAsBool:self.cameraRenderController.tapToTakePicture];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:self.onPictureTakenHandlerId];
     }
-    imageToFilter = [capturedCImage imageByApplyingTransform:matrix];
-  } else {
-    imageToFilter = capturedCImage;
-  }
+}
 
-  CIFilter *filter = [self.sessionManager ciFilter];
-  if (filter != nil) {
-    [self.sessionManager.filterLock lock];
-    [filter setValue:imageToFilter forKey:kCIInputImageKey];
-    finalCImage = [filter outputImage];
-    [self.sessionManager.filterLock unlock];
-  } else {
-    finalCImage = imageToFilter;
-  }
+- (NSData *)webpDataFromCIImage:(CIImage *)ciImage
+                        quality:(float)quality
+                      ciContext:(CIContext *)ciContext {
+    CGRect extent = ciImage.extent;
+    size_t width = (size_t)extent.size.width;
+    size_t height = (size_t)extent.size.height;
+    if (width == 0 || height == 0) return nil;
+    
+    int webpQuality = (int)(quality * 100);
+    webpQuality = MAX(0, MIN(100, webpQuality));
 
-  CDVPluginResult *pluginResult;
-  if(enableFastShoot){
-    if(self.storeToFile){
-      NSString* filePath = [self getTempFilePath:@"jpg"];
-      NSURL* path = [NSURL fileURLWithPath:filePath];
-      CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-      NSDictionary* options = @{
-        (NSString *)kCGImageDestinationLossyCompressionQuality : [NSNumber numberWithFloat:quality]
-      };
-      NSError* error;
-      BOOL saved = [self.cameraRenderController.ciContext writeJPEGRepresentationOfImage:finalCImage toURL:path colorSpace:colorSpace options: options error:&error];
-      if(!saved){
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:[error localizedDescription]];
-      } else {
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[path absoluteString]];
-      }
-    } else {
-      CGImageRef finalImage = [self.cameraRenderController.ciContext createCGImage:finalCImage fromRect:finalCImage.extent];\
-      CGImageRelease(finalImage);
+    size_t bytesPerRow = width * 4;
+    uint8_t *rgba = (uint8_t *)malloc(bytesPerRow * height);
+    if (!rgba) return nil;
 
-      NSMutableArray *params = [[NSMutableArray alloc] init];
-      NSString *base64Image = [self getBase64Image:finalImage withQuality:quality];
-      [params addObject:base64Image];
-      pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:params];
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    [ciContext render:ciImage
+             toBitmap:rgba
+             rowBytes:bytesPerRow
+               bounds:extent
+               format:kCIFormatRGBA8
+           colorSpace:colorSpace];
+    CGColorSpaceRelease(colorSpace);
+
+    WebPConfig config;
+    if (!WebPConfigPreset(&config, WEBP_PRESET_PICTURE, webpQuality)) {
+        free(rgba);
+        return nil;
     }
-  } else {
-    CGImageRef finalImage = [self.cameraRenderController.ciContext createCGImage:finalCImage fromRect:finalCImage.extent];
-    UIImage *resultImage = [UIImage imageWithCGImage:finalImage];
+    config.method = 6;
 
-    double radians = [self radiansFromUIImageOrientation:resultImage.imageOrientation];
-    CGImageRef resultFinalImage = [self CGImageRotated:finalImage withRadians:radians];
+    WebPPicture picture;
+    if (!WebPPictureInit(&picture)) {
+        free(rgba);
+        return nil;
+    }
+    picture.width = (int)width;
+    picture.height = (int)height;
+    picture.use_argb = 1;
 
-    CGImageRelease(finalImage); // release CGImageRef to remove memory leaks
-
-    if (self.storeToFile) {
-      NSData *data = UIImageJPEGRepresentation([UIImage imageWithCGImage:resultFinalImage], (CGFloat) quality);
-      NSString* filePath = [self getTempFilePath:@"jpg"];
-      NSError *err;
-
-      if (![data writeToFile:filePath options:NSAtomicWrite error:&err]) {
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:[err localizedDescription]];
-      }
-      else {
-        pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[[NSURL fileURLWithPath:filePath] absoluteString]];
-      }
-    } else {
-      NSMutableArray *params = [[NSMutableArray alloc] init];
-      NSString *base64Image = [self getBase64Image:resultFinalImage withQuality:quality];
-      [params addObject:base64Image];
-      pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsArray:params];
+    if (!WebPPictureImportRGBA(&picture, rgba, (int)bytesPerRow)) {
+        WebPPictureFree(&picture);
+        free(rgba);
+        return nil;
     }
 
-    CGImageRelease(resultFinalImage); // release CGImageRef to remove memory leaks
-  }
+    WebPMemoryWriter writer;
+    WebPMemoryWriterInit(&writer);
+    picture.writer = WebPMemoryWrite;
+    picture.custom_ptr = &writer;
 
-  [pluginResult setKeepCallbackAsBool:self.cameraRenderController.tapToTakePicture];
-  [self.commandDelegate sendPluginResult:pluginResult callbackId:self.onPictureTakenHandlerId];
-  }
+    if (!WebPEncode(&config, &picture)) {
+        WebPMemoryWriterClear(&writer);
+        WebPPictureFree(&picture);
+        free(rgba);
+        return nil;
+    }
+
+    NSData *webpData = [NSData dataWithBytes:writer.mem length:writer.size];
+
+    WebPMemoryWriterClear(&writer);
+    WebPPictureFree(&picture);
+    free(rgba);
+
+    return webpData;
 }
 
 - (NSString*)getTempDirectoryPath

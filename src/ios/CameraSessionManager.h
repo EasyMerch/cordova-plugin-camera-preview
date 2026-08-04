@@ -42,6 +42,7 @@
 - (void) setTorchMode;
 - (AVCaptureVideoOrientation) getCurrentOrientation:(UIInterfaceOrientation)toInterfaceOrientation;
 - (AVCapturePhotoSettings*) captureSettings;
+- (AVCapturePhotoSettings*) captureSettingsWithFormat:(NSString*)withFormat;
 - (AVCaptureDevice*) cameraWithPosition:(AVCaptureDevicePosition)position;
 
 @property (atomic) CIFilter *ciFilter;
