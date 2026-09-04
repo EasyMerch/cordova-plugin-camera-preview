@@ -76,6 +76,14 @@
     <framework src="GLKit.framework" />
     <framework src="CoreVideo.framework" />
     <framework src="QuartzCore.framework"/>
+    <podspec>
+        <config>
+            <source url="https://cdn.cocoapods.org/"/>
+        </config>
+        <pods use-frameworks="true">
+            <pod name="libwebp" spec="~> 1.4.0" options=":modular_headers => true"/>
+        </pods>
+    </podspec>
   </platform>
 
 </plugin>

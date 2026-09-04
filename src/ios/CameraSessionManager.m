@@ -746,9 +746,19 @@
 }
 
 - (AVCapturePhotoSettings*) captureSettings {
-  AVCapturePhotoSettings* settings = [AVCapturePhotoSettings photoSettings];
-  settings.flashMode = self.defaultFlashMode;
-  return settings;
+    return [self captureSettingsWithFormat:@"jpeg"];
+}
+
+- (AVCapturePhotoSettings*) captureSettingsWithFormat:(NSString*) withFormat {
+    AVCapturePhotoSettings *settings;
+    if ([withFormat isEqualToString:@"webp"]) {
+        NSDictionary *format = @{(NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA)};
+        settings = [AVCapturePhotoSettings photoSettingsWithFormat:format];
+    } else {
+        settings = [AVCapturePhotoSettings photoSettings];
+    }
+    settings.flashMode = self.defaultFlashMode;
+    return settings;
 }
 
 @end
