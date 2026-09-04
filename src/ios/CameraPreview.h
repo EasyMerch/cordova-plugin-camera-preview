@@ -37,9 +37,9 @@
 - (void) getSupportedWhiteBalanceModes:(CDVInvokedUrlCommand*)command;
 - (void) getWhiteBalanceMode:(CDVInvokedUrlCommand*)command;
 - (void) setWhiteBalanceMode:(CDVInvokedUrlCommand*)command;
-- (NSData *)processImageFromPixelBuffer:(CVPixelBufferRef)pixelBuffer targetWidth:(int)targetWidth targetHeight:(int)targetHeight orientation:(CGImagePropertyOrientation)orientation wrapX:(BOOL)wrapX quality:(float)quality losslessPreset:(float)losslessPreset
+- (NSData *)processImageFromPixelBuffer:(CVPixelBufferRef)pixelBuffer targetWidth:(int)targetWidth targetHeight:(int)targetHeight orientation:(CGImagePropertyOrientation)orientation wrapX:(BOOL)wrapX quality:(float)quality losslessPreset:(float)losslessPreset;
 
-- (void) invokeTakePicture:(CGFloat) width withHeight:(CGFloat) height withQuality:(CGFloat) quality withLossLessPreset:(CGFloat) lossLessPreset withFormat:(NSString *) format
+- (void) invokeTakePicture:(CGFloat) width withHeight:(CGFloat) height withQuality:(CGFloat) quality withLossLessPreset:(CGFloat) lossLessPreset withFormat:(NSString *) format;
 - (void) invokeTakePicture:(CGFloat) width withHeight:(CGFloat) height withQuality:(CGFloat) quality;
 - (void) invokeTakePicture;
 
